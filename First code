@@ -1,0 +1,124 @@
+import gym
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from collections import deque
+import random
+
+# Define a simple custom Environment (Placeholder for building simulation)
+class BuildingEnv(gym.Env):
+    def __init__(self):
+        super(BuildingEnv, self).__init__()
+        # Example: Window size [0,1], Insulation thickness [0,1], HVAC setpoint [0,1]
+        self.observation_space = gym.spaces.Box(low=0, high=1, shape=(3,), dtype=np.float32)
+        self.action_space = gym.spaces.Box(low=0, high=1, shape=(3,), dtype=np.float32)
+    
+    def reset(self):
+        self.state = np.random.rand(3)
+        return self.state
+
+    def step(self, action):
+        # Dummy energy consumption model
+        energy_consumption = (1.5 - action[0])**2 + (1.2 - action[1])**2 + (0.8 - action[2])**2
+        reward = -energy_consumption  # Minimize consumption = maximize negative reward
+        done = True  # One-step environment
+        return np.random.rand(3), reward, done, {}
+
+# Deep Q-Network (can replace with DDPG Actor-Critic for continuous action space)
+class DQN(nn.Module):
+    def __init__(self, state_dim, action_dim):
+        super(DQN, self).__init__()
+        self.fc1 = nn.Linear(state_dim, 128)
+        self.fc2 = nn.Linear(128, 128)
+        self.fc3 = nn.Linear(128, action_dim)
+    
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        return self.fc3(x)
+
+# Replay Buffer
+class ReplayBuffer:
+    def __init__(self, max_size=10000):
+        self.buffer = deque(maxlen=max_size)
+    
+    def add(self, transition):
+        self.buffer.append(transition)
+    
+    def sample(self, batch_size):
+        batch = random.sample(self.buffer, batch_size)
+        state, action, reward, next_state = zip(*batch)
+        return np.array(state), np.array(action), np.array(reward), np.array(next_state)
+
+# Hyperparameters
+gamma = 0.99
+lr = 1e-3
+batch_size = 64
+episodes = 1000
+epsilon = 1.0
+epsilon_decay = 0.995
+epsilon_min = 0.01
+
+# Initialize
+env = BuildingEnv()
+state_dim = env.observation_space.shape[0]
+action_dim = env.action_space.shape[0]
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+q_network = DQN(state_dim, action_dim).to(device)
+target_network = DQN(state_dim, action_dim).to(device)
+target_network.load_state_dict(q_network.state_dict())
+
+optimizer = optim.Adam(q_network.parameters(), lr=lr)
+replay_buffer = ReplayBuffer()
+
+# Training Loop
+for episode in range(episodes):
+    state = env.reset()
+    done = False
+    episode_reward = 0
+    
+    while not done:
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+        if np.random.rand() < epsilon:
+            action = np.random.uniform(0, 1, size=action_dim)
+        else:
+            with torch.no_grad():
+                q_values = q_network(state_tensor)
+                action = q_values.cpu().numpy()[0]
+        
+        next_state, reward, done, _ = env.step(action)
+        replay_buffer.add((state, action, reward, next_state))
+        state = next_state
+        episode_reward += reward
+        
+        if len(replay_buffer.buffer) > batch_size:
+            states, actions, rewards, next_states = replay_buffer.sample(batch_size)
+            
+            states = torch.FloatTensor(states).to(device)
+            actions = torch.FloatTensor(actions).to(device)
+            rewards = torch.FloatTensor(rewards).unsqueeze(1).to(device)
+            next_states = torch.FloatTensor(next_states).to(device)
+            
+            current_q = q_network(states)
+            next_q = target_network(next_states).detach()
+            max_next_q = next_q.max(1)[0].unsqueeze(1)
+            target_q = rewards + gamma * max_next_q
+            
+            loss = nn.MSELoss()(current_q, target_q)
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+    
+    epsilon = max(epsilon * epsilon_decay, epsilon_min)
+    
+    if episode % 10 == 0:
+        target_network.load_state_dict(q_network.state_dict())
+        print(f"Episode {episode}, Reward: {episode_reward:.2f}, Epsilon: {epsilon:.3f}")
+
+print("Training Completed!")
+
+# Save the model
+torch.save(q_network.state_dict(), "building_design_dqn.pth")
